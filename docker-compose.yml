@@ -1,0 +1,387 @@
+version: "3.9"
+
+# =========================================================
+# DELFSA — Distributed Enterprise Lab For Security Analysis
+# Phase 1 compose file: core infrastructure + SIEM pipeline
+# + attacker node. Enterprise target services, additional
+# infra (rabbitmq/minio/vault) and background-activity
+# generators are added in a later phase file and merged in
+# via docker/compose/ overrides.
+# =========================================================
+
+networks:
+  delfsa-core:
+    name: delfsa-core
+    driver: bridge
+  delfsa-monitoring:
+    name: delfsa-monitoring
+    driver: bridge
+  delfsa-attack-range:
+    name: delfsa-attack-range
+    driver: bridge
+    internal: true
+
+volumes:
+  redis-data:
+  postgres-data:
+  elasticsearch-data:
+  grafana-data:
+
+services:
+
+  # ------------------------------------------------------
+  # Infrastructure
+  # ------------------------------------------------------
+
+  redis:
+    image: delfsa/redis:latest
+    build:
+      context: .
+      dockerfile: docker/services/infrastructure/redis/Dockerfile
+    container_name: delfsa-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_redis_password}
+    volumes:
+      - redis-data:/data
+    networks:
+      - delfsa-core
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    image: delfsa/postgres:latest
+    build:
+      context: .
+      dockerfile: docker/services/infrastructure/postgres/Dockerfile
+    container_name: delfsa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-delfsa}
+      POSTGRES_USER: ${POSTGRES_USER:-delfsa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_postgres_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - delfsa-core
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-delfsa} -d ${POSTGRES_DB:-delfsa}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  elasticsearch:
+    image: delfsa/elasticsearch:latest
+    build:
+      context: .
+      dockerfile: docker/services/infrastructure/elasticsearch/Dockerfile
+    container_name: delfsa-elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - delfsa-core
+      - delfsa-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  kibana:
+    image: delfsa/kibana:latest
+    build:
+      context: .
+      dockerfile: docker/services/infrastructure/kibana/Dockerfile
+    container_name: delfsa-kibana
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    networks:
+      - delfsa-core
+      - delfsa-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: delfsa/prometheus:latest
+    build:
+      context: .
+      dockerfile: docker/services/infrastructure/prometheus/Dockerfile
+    container_name: delfsa-prometheus
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - delfsa-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: delfsa/grafana:latest
+    build:
+      context: .
+      dockerfile: docker/services/infrastructure/grafana/Dockerfile
+    container_name: delfsa-grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me_grafana_password}
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - delfsa-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  reverse-proxy:
+    image: delfsa/reverse-proxy:latest
+    build:
+      context: .
+      dockerfile: docker/services/infrastructure/reverse-proxy/Dockerfile
+    container_name: delfsa-reverse-proxy
+    restart: unless-stopped
+    depends_on:
+      kibana:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+    ports:
+      - "${REVERSE_PROXY_PORT:-8080}:8080"
+    networks:
+      - delfsa-core
+      - delfsa-monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------
+  # SIEM pipeline
+  # ------------------------------------------------------
+
+  log-shipper:
+    image: delfsa/log-shipper:latest
+    build:
+      context: .
+      dockerfile: docker/services/siem/log-shipper/Dockerfile
+    container_name: delfsa-log-shipper
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_redis_password}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_SHIPPER_POLL_INTERVAL: ${LOG_SHIPPER_POLL_INTERVAL:-2}
+      LOG_SHIPPER_WATCH_DIR: /var/log/delfsa-sources
+    volumes:
+      - ./logs:/var/log/delfsa-sources:ro
+    networks:
+      - delfsa-core
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  normalizer:
+    image: delfsa/normalizer:latest
+    build:
+      context: .
+      dockerfile: docker/services/siem/normalizer/Dockerfile
+    container_name: delfsa-normalizer
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_redis_password}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes: []
+    networks:
+      - delfsa-core
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  detection-engine:
+    image: delfsa/detection-engine:latest
+    build:
+      context: .
+      dockerfile: docker/services/siem/detection-engine/Dockerfile
+    container_name: delfsa-detection-engine
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_redis_password}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./rules:/rules:ro
+    networks:
+      - delfsa-core
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  correlation-engine:
+    image: delfsa/correlation-engine:latest
+    build:
+      context: .
+      dockerfile: docker/services/siem/correlation-engine/Dockerfile
+    container_name: delfsa-correlation-engine
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me_redis_password}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORRELATION_WINDOW_SECONDS: ${CORRELATION_WINDOW_SECONDS:-300}
+      CORRELATION_THRESHOLD: ${CORRELATION_THRESHOLD:-3}
+      INCIDENT_COOLDOWN_SECONDS: ${INCIDENT_COOLDOWN_SECONDS:-120}
+    volumes: []
+    networks:
+      - delfsa-core
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------
+  # Attackers (isolated network, opt-in via profile)
+  # ------------------------------------------------------
+
+  kali:
+    image: delfsa/kali:latest
+    build:
+      context: .
+      dockerfile: docker/services/attackers/kali/Dockerfile
+    container_name: delfsa-kali
+    restart: unless-stopped
+    profiles: ["attack"]
+    volumes:
+      - ./attack-scenarios:/attack-scenarios:ro
+    networks:
+      - delfsa-attack-range
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f entrypoint.sh || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,31 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: delfsa
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+
+  - job_name: "postgres"
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: "elasticsearch"
+    metrics_path: /_prometheus/metrics
+    static_configs:
+      - targets: ["elasticsearch:9200"]
+
+  - job_name: "delfsa-siem-services"
+    static_configs:
+      - targets:
+          - "log-shipper:9100"
+          - "normalizer:9100"
+          - "detection-engine:9100"
+          - "correlation-engine:9100"

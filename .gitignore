@@ -1,0 +1,12 @@
+.env
+volumes/
+logs/*.log
+logs/**/*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.DS_Store
+*.swp

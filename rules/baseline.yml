@@ -1,0 +1,68 @@
+# DELFSA baseline detection rules
+# Loaded by docker/services/siem/detection-engine/app.py at startup and
+# hot-reloaded every 60 seconds. Add additional *.yml files to this
+# directory to extend coverage — no code changes required.
+
+- id: RULE-001
+  name: "Failed SSH authentication attempt"
+  severity: medium
+  mitre: T1110
+  contains:
+    field: parsed.message
+    substring: "Failed password"
+
+- id: RULE-002
+  name: "SSH root login attempt"
+  severity: high
+  mitre: T1078
+  contains:
+    field: parsed.message
+    substring: "root"
+
+- id: RULE-003
+  name: "HTTP 401/403 access denied"
+  severity: low
+  mitre: T1595
+  regex:
+    field: parsed.http_status
+    pattern: "^(401|403)$"
+
+- id: RULE-004
+  name: "HTTP 500 internal server error"
+  severity: low
+  mitre: T1499
+  regex:
+    field: parsed.http_status
+    pattern: "^5\\d\\d$"
+
+- id: RULE-005
+  name: "Possible SQL injection in HTTP request path"
+  severity: high
+  mitre: T1190
+  regex:
+    field: parsed.http_path
+    pattern: "(?i)(union\\s+select|or\\s+1=1|--|;--|/\\*)"
+
+- id: RULE-006
+  name: "Possible directory traversal in HTTP request path"
+  severity: high
+  mitre: T1083
+  contains:
+    field: parsed.http_path
+    substring: "../"
+
+- id: RULE-007
+  name: "Suspicious user agent (known scanner tool)"
+  severity: medium
+  mitre: T1595
+  regex:
+    field: parsed.user_agent
+    pattern: "(?i)(nmap|nikto|sqlmap|hydra|masscan|gobuster)"
+
+- id: RULE-008
+  name: "Sudo privilege escalation event"
+  severity: medium
+  mitre: T1548
+  match:
+    field: parsed.process
+    value: sudo
